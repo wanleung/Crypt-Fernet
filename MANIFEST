@@ -1,0 +1,6 @@
+Changes
+Makefile.PL
+MANIFEST
+README
+t/Crypt-Fernet.t
+lib/Crypt/Fernet.pm
