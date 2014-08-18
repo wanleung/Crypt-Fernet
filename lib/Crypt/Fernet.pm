@@ -37,7 +37,7 @@ use Digest::SHA qw(hmac_sha256);
 use MIME::Base64::URLSafe;
 
 sub generate_key {
-    return urlsafe_b64encode(Crypt::CBC->random_bytes(32));
+    return _urlsafe_pading_base64_encode(Crypt::CBC->random_bytes(32));
 }
 
 sub encrypt {
@@ -59,7 +59,7 @@ sub encrypt {
     my $pre_token = $FERNET_TOKEN_VERSION . _timestamp() . $iv . $ciphertext;
     my $digest=hmac_sha256($pre_token, $signkey);
     my $token = $pre_token . $digest;
-    return urlsafe_b64encode($token);
+    return _urlsafe_pading_base64_encode($token);
 }
 
 sub decrypt {
@@ -112,6 +112,12 @@ sub _timestamp {
     my $result = reverse $time64bit;
     no bytes;
     return $result;
+}
+
+sub _urlsafe_pading_base64_encode {
+    my ($msg) = @_;
+    my $s = urlsafe_b64encode($msg);
+    return $s.("=" x (4 - length($s) % 4));
 }
 
 1;
