@@ -16,7 +16,7 @@ our @ISA = qw(Exporter);
 # If you do not need this, moving things directly into @EXPORT or @EXPORT_OK
 # will save memory.
 our %EXPORT_TAGS = ( 'all' => [ qw(
-	
+  fernet_genkey fernet_encrypt fernet_verify fernet_decrypt	
 ) ] );
 
 our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
@@ -31,6 +31,12 @@ our $FERNET_TOKEN_VERSION = pack("H*", '80');
 
 
 # Preloaded methods go here.
+
+sub fernet_genkey { Crypt::Fernet::generate_key() }
+sub fernet_encrypt  { Crypt::Fernet::encrypt(@_) }
+sub fernet_verify  { Crypt::Fernet::verify(@_) }
+sub fernet_decrypt { Crypt::Fernet::decrypt(@_) }
+
 
 use Crypt::CBC;
 use Digest::SHA qw(hmac_sha256);
