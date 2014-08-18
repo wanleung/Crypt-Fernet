@@ -153,6 +153,17 @@ Crypt::Fernet - Perl extension for Fernet (symmetric encryption)
   my $verify = Crypt::Fernet::verify($key, $token);
   my $decrypttext = Crypt::Fernet::decrypt($key, $token);
 
+  my $old_key = 'cJ3Fw3ehXqef-Vqi-U8YDcJtz8Gv-ZHyxultoAGHi4c=';
+  my $old_token = 'gAAAAABT8bVcdaked9SPOkuQ77KsfkcoG9GvuU4SVWuMa3ewrxpQdreLdCT6cc7rdqkavhyLgqZC41dW2vwZJAHLYllwBmjgdQ==';
+
+  my $ttl = 10;
+  my $old_verify = Crypt::Fernet::verify($old_key, $old_token, $ttl);
+  my $old_decrypttext = Crypt::Fernet::decrypt($old_key, $old_token, $ttl);
+
+  my $ttl_verify = Crypt::Fernet::verify($key, $token, $ttl);
+  my $ttl_decrypttext = Crypt::Fernet::decrypt($key, $token, $ttl);
+
+
 =head1 DESCRIPTION
 
 Fernet provides guarantees that a message encrypted using it cannot be manipulated or read without the key. Fernet is an implementation of symmetric (also known as “secret key”) authenticated cryptography.
