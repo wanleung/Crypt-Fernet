@@ -63,8 +63,8 @@ sub encrypt {
 }
 
 sub decrypt {
-    my ($key, $token) = @_;
-    verify($key, $token) or return;
+    my ($key, $token, $ttl) = @_;
+    verify($key, $token, $ttl) or return;
     my $b64decode_key = urlsafe_b64decode($key);
     my $token_data = urlsafe_b64decode($token);
 
@@ -88,12 +88,19 @@ sub decrypt {
 }
 
 sub verify {
-    my ($key, $token) = @_;
+    my ($key, $token, $ttl) = @_;
+    $ttl ||= 0;
     my $b64decode_key = urlsafe_b64decode($key);
     my $msg = urlsafe_b64decode($token);
     my $token_version = substr $msg, 0, 1;
     ($token_version eq $FERNET_TOKEN_VERSION) or return 0;
-    
+
+    if ($ttl > 0) {
+        my $timestamp_bytes = substr $msg, 1, 8;
+        my $timestamp = _byte_to_time($timestamp_bytes);
+        return 0 if (time - $timestamp > $ttl);
+    }    
+
     my $token_sign = substr $msg, (length $msg) - 32, 32;
     my $signkey = substr $b64decode_key, 0, 16;
     my $pre_token = substr $msg, 0, (length $msg) - 32;
@@ -118,6 +125,14 @@ sub _urlsafe_pading_base64_encode {
     my ($msg) = @_;
     my $s = urlsafe_b64encode($msg);
     return $s.("=" x (4 - length($s) % 4));
+}
+
+sub _byte_to_time {
+    my ($bytes) = @_;
+    use bytes;
+    my $rb =  reverse $bytes;
+    my $time = unpack 'V', $rb;
+    return $time;
 }
 
 1;
