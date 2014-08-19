@@ -25,7 +25,7 @@ our @EXPORT = qw(
 	
 );
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 our $FERNET_TOKEN_VERSION = pack("H*", '80');
 
