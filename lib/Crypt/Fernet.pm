@@ -58,7 +58,7 @@ sub encrypt {
                                  -keysize     => 16,
                                  -blocksize   => 16,
                                  -padding     => 'standard',
-                                 -cipher => 'Rijndael',
+                                 -cipher      => 'Rijndael',
                                  -header      => 'none',
                              );
     my $ciphertext = $cipher->encrypt($data);
@@ -86,7 +86,7 @@ sub decrypt {
                                  -keysize     => 16,
                                  -blocksize   => 16,
                                  -padding     => 'standard',
-                                 -cipher => 'Rijndael',
+                                 -cipher      => 'Rijndael',
                                  -header      => 'none',
                              );
     my $plaintext = $cipher->decrypt($ciphertext);
@@ -172,7 +172,7 @@ Crypt::Fernet - Perl extension for Fernet (symmetric encryption)
 
 =head1 DESCRIPTION
 
-Fernet provides guarantees that a message encrypted using it cannot be manipulated or read without the key. Fernet is an implementation of symmetric (also known as “secret key”) authenticated cryptography.
+Fernet provides guarantees that a message encrypted using it cannot be manipulated or read without the key. Fernet is an implementation of symmetric (also known as "secret key") authenticated cryptography.
 This is the Perl Implementation
 
 More Detail:
