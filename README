@@ -1,7 +1,7 @@
 Crypt-Fernet version 0.01
 =========================
 
-Fernet (symmetric encryption)
+Perl extension for Fernet (symmetric encryption)
 
 Fernet provides guarantees that a message encrypted using it cannot be manipulated or read without the key. Fernet is an implementation of symmetric (also known as “secret key”) authenticated cryptography. 
 This is the Perl Implementation

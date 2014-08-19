@@ -8,8 +8,13 @@
 use strict;
 use warnings;
 
-use Test::More tests => 9;
-BEGIN { use_ok('Crypt::Fernet') };
+use Test::More tests => 12;
+BEGIN { 
+    use_ok('Crypt::CBC');
+    use_ok('Digest::SHA');
+    use_ok('MIME::Base64::URLSafe');
+    use_ok('Crypt::Fernet') 
+};
 
 my $key = Crypt::Fernet::generate_key();
 my $plaintext = 'This is a test';
