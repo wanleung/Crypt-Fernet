@@ -1,7 +1,12 @@
 Revision history for Perl extension Crypt::Fernet.
 
+0.0301  Wed Sep 11 17:22:00 2024 Iain Campbell <cpanic@cpan.org>
+  - Add Crypt::Rijndael to [Prereqs/TestPrereqs] as it wasn't 
+    picked up by Dist::Zilla automatically and its absence
+    causes build builures on CPANTs.
+
 0.03  Wed Sep 11 17:22:00 2024 Iain Campbell <cpanic@cpan.org>
-    - update lib/Crypt/Fernet.pm
+  - update lib/Crypt/Fernet.pm
 	  do not pass "blocksize" to &Crypt::CBC::new because:
 	  (a) it is not an option recognised by Crypt::CBC, and it
 	      complains, resulting in failure to test and install.
