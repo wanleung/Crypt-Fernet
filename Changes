@@ -1,5 +1,11 @@
 Revision history for Perl extension Crypt::Fernet.
 
+0.0303  Wed Aug 12 17:39:00 2025
+  - update version number
+
+0.0302  Fri Nov 29 17:39:00 2024
+  - update version
+
 0.0301  Wed Sep 11 17:22:00 2024 Iain Campbell <cpanic@cpan.org>
   - Add Crypt::Rijndael to [Prereqs/TestPrereqs] as it wasn't 
     picked up by Dist::Zilla automatically and its absence
