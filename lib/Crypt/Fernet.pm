@@ -25,7 +25,7 @@ our @EXPORT = qw(
 );
 
 our $FERNET_TOKEN_VERSION = pack("H*", '80');
-
+our $MAX_CLOCK_SKEW = 60;
 
 # Preloaded methods go here.
 
@@ -53,7 +53,17 @@ sub encrypt {
 
 sub encrypt_at_time {
     my ($key, $data, $current_time) = @_;
-    my $b64decode_key = urlsafe_b64decode($key);
+
+    die "data must be bytes" unless defined $data;
+    die "data must be bytes" unless ref($data) eq '' || ref($data) eq 'SCALAR';
+
+    my $b64decode_key;
+    eval {
+        $b64decode_key = urlsafe_b64decode($key);
+    };
+    if ($@ || length($b64decode_key) != 32) {
+        die "Fernet key must be 32 url-safe base64-encoded bytes.";
+    }
     my $signkey = substr $b64decode_key, 0, 16;
     my $encryptkey = substr $b64decode_key, 16, 16;
     my $iv = urandom(16);
@@ -67,36 +77,27 @@ sub encrypt_at_time {
                              );
     my $ciphertext = $cipher->encrypt($data);
     my $pre_token = $FERNET_TOKEN_VERSION . _timestamp($current_time) . $iv . $ciphertext;
-    my $digest=hmac_sha256($pre_token, $signkey);
+    my $digest = hmac_sha256($pre_token, $signkey);
     my $token = $pre_token . $digest;
+
     return _urlsafe_pading_base64_encode($token);
 }
 
 sub decrypt_at_time {
+    my ($key, $token, $ttl, $current_time) = @_;
+
+    die "decrypt_at_time() can only be used with a defined ttl" unless defined
+$ttl;
+
+    my ($timestamp, $data) = _get_unverified_token_data($token);
+    return _decrypt_data($key, $data, $timestamp, $ttl, $current_time);
 }
 
 sub decrypt {
     my ($key, $token, $ttl) = @_;
-    verify($key, $token, $ttl) or return;
-    my $b64decode_key = urlsafe_b64decode($key);
-    my $token_data = urlsafe_b64decode($token);
 
-    my $encryptkey = substr $b64decode_key, 16, 16;
-    my $iv = substr $token_data, 9, 16;
-
-    my $ciphertextlen = (length $token_data) - 25 - 32;
-    my $ciphertext = substr $token_data, 25, $ciphertextlen;
- 
-    my $cipher = Crypt::CBC->new(-literal_key => 1,
-                                 -key         => $encryptkey,
-                                 -iv          => $iv,
-                                 -keysize     => 16,
-                                 -padding     => 'standard',
-                                 -cipher      => 'Rijndael',
-                                 -header      => 'none',
-                             );
-    my $plaintext = $cipher->decrypt($ciphertext);
-    return $plaintext; 
+    my ($timestamp, $data) = _get_unverified_token_data($token);
+    return _decrypt_data($key, $data, $timestamp, $ttl, time());
 }
 
 sub verify {
@@ -125,9 +126,45 @@ sub extract_timestamp {
     my ($key, $token) = @_;
     my ($timestamp, $data) = _get_unverified_token_data($token);
 
-    #_verify_signature($key, $data);
+    _verify_signature($key, $data);
 
     return $timestamp;
+}
+
+sub _decrypt_data {
+    my ($key, $data, $timestamp, $ttl, $current_time) = @_;
+
+    #if (defined $ttl) {
+    #    die "Invalid token" if ($timestamp + $ttl < $current_time);
+    #	die "Invalid token" if ($current_time + $MAX_CLOCK_SKEW < $timestamp);
+    #}
+
+    _verify_signature($key, $data);
+
+    my $b64decode_key = urlsafe_b64decode($key);
+
+    my $encryptkey = substr $b64decode_key, 16, 16;
+    my $iv = substr $data, 9, 16;
+
+    my $ciphertextlen = (length $data) - 25 - 32;
+    my $ciphertext = substr $data, 25, $ciphertextlen;
+
+    my $cipher = Crypt::CBC->new(-literal_key => 1,
+                                 -key         => $encryptkey,
+                                 -iv          => $iv,
+                                 -keysize     => 16,
+                                 -padding     => 'standard',
+                                 -cipher      => 'Rijndael',
+                                 -header      => 'none',
+                             );
+    my $plaintext;
+    eval {
+        $plaintext = $cipher->decrypt($ciphertext);
+    };
+    if ($@) {
+        die "Invalid token";
+    }
+    return $plaintext;
 }
 
 sub _get_unverified_token_data {
@@ -144,8 +181,10 @@ sub _get_unverified_token_data {
     if ($@) {
         die "Invalid token";
     }
-    print $token."\n";
-    print $data."\n";
+    
+    my $token_version = substr($data, 0, 1);
+    die "Invalid token" unless ($token_version eq $FERNET_TOKEN_VERSION);
+
     my $timestamp_bytes = substr($data, 1, 8);
     my $timestamp = _byte_to_time($timestamp_bytes);
 
@@ -176,6 +215,32 @@ sub _byte_to_time {
     my $rb =  reverse $bytes;
     my $time = unpack 'V', $rb;
     return $time;
+}
+
+sub _verify_signature {
+    my ($key, $data) = @_;
+
+    my $key_bytes = urlsafe_b64decode($key);
+    my $signing_key = substr($key_bytes, 0, 16);
+
+    my $stored_hmac = substr($data, -32);
+    my $message = substr($data, 0, length($data) - 32);
+    my $computed_hmac = hmac_sha256($message, $signing_key);
+
+    unless (_constant_time_compare($stored_hmac, $computed_hmac)) {
+        die "Invalid token";
+    }
+}
+
+sub _constant_time_compare {
+    my ($a, $b) = @_;
+    return 0 if length($a) != length($b);
+
+    my $result = 0;
+    for my $i (0 .. length($a) - 1) {
+        $result |= ord(substr($a, $i, 1)) ^ ord(substr($b, $i, 1));
+    }
+    return $result == 0;
 }
 
 1;
