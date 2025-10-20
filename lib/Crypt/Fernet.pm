@@ -15,7 +15,7 @@ use Exporter 5.57 qw( import );
 # If you do not need this, moving things directly into @EXPORT or @EXPORT_OK
 # will save memory.
 our %EXPORT_TAGS = ( 'all' => [ qw(
-  fernet_genkey fernet_encrypt fernet_verify fernet_decrypt	
+  fernet_genkey fernet_encrypt fernet_verify fernet_decrypt fernet_extract_timestamp
 ) ] );
 
 our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
@@ -33,6 +33,7 @@ sub fernet_genkey { Crypt::Fernet::generate_key() }
 sub fernet_encrypt  { Crypt::Fernet::encrypt(@_) }
 sub fernet_verify  { Crypt::Fernet::verify(@_) }
 sub fernet_decrypt { Crypt::Fernet::decrypt(@_) }
+sub fernet_extract_timestamp { Crypt::Fernet::extract_timestamp(@_) }
 
 
 use Crypt::CBC;
@@ -42,11 +43,16 @@ use Digest::SHA qw(hmac_sha256);
 use MIME::Base64::URLSafe;
 
 sub generate_key {
-    return _urlsafe_pading_base64_encode(Crypt::CBC->random_bytes(32));
+    return _urlsafe_pading_base64_encode(urandom(32));
 }
 
 sub encrypt {
     my ($key, $data) = @_;
+    return encrypt_at_time($key, $data, time());
+}
+
+sub encrypt_at_time {
+    my ($key, $data, $current_time) = @_;
     my $b64decode_key = urlsafe_b64decode($key);
     my $signkey = substr $b64decode_key, 0, 16;
     my $encryptkey = substr $b64decode_key, 16, 16;
@@ -60,10 +66,13 @@ sub encrypt {
                                  -header      => 'none',
                              );
     my $ciphertext = $cipher->encrypt($data);
-    my $pre_token = $FERNET_TOKEN_VERSION . _timestamp() . $iv . $ciphertext;
+    my $pre_token = $FERNET_TOKEN_VERSION . _timestamp($current_time) . $iv . $ciphertext;
     my $digest=hmac_sha256($pre_token, $signkey);
     my $token = $pre_token . $digest;
     return _urlsafe_pading_base64_encode($token);
+}
+
+sub decrypt_at_time {
 }
 
 sub decrypt {
@@ -112,9 +121,40 @@ sub verify {
     return 0;
 }
 
+sub extract_timestamp {
+    my ($key, $token) = @_;
+    my ($timestamp, $data) = _get_unverified_token_data($token);
+
+    #_verify_signature($key, $data);
+
+    return $timestamp;
+}
+
+sub _get_unverified_token_data {
+    my ($token) = @_;
+
+    unless (defined $token && (ref($token) eq '' || ref($token) eq 'SCALAR')) {
+        die "Invalid token";
+    }
+
+    my $data;
+    eval {
+        $data = urlsafe_b64decode($token);
+    };
+    if ($@) {
+        die "Invalid token";
+    }
+    print $token."\n";
+    print $data."\n";
+    my $timestamp_bytes = substr($data, 1, 8);
+    my $timestamp = _byte_to_time($timestamp_bytes);
+
+    return ($timestamp, $data);
+}
+
 sub _timestamp {
     use bytes;
-    my $time = time;
+    my $time = shift || time;
     my $time64bit;
     for my $index (0..7) {
         $time64bit .= substr pack("I", ($time >> $index * 8) & 0xFF), 0, 1;

@@ -8,9 +8,10 @@
 use strict;
 use warnings;
 
-use Test::More tests => 14;
+use Test::More tests => 16;
 BEGIN { 
     use_ok('Crypt::CBC');
+    use_ok('Crypt::URandom');
     use_ok('Digest::SHA');
     use_ok('MIME::Base64::URLSafe');
     use_ok('Crypt::Fernet') 
@@ -35,6 +36,9 @@ my $o_d = Crypt::Fernet::decrypt($old_key, $old_token);
 my $ttl_verify = Crypt::Fernet::verify($key, $token, $ttl);
 my $ttl_decrypttext = Crypt::Fernet::decrypt($key, $token, $ttl);
 
+my $current_time = time;
+my $token_time = Crypt::Fernet::extract_timestamp($key, $token);
+
 ok( $key );
 ok( $token );
 ok( $verify );
@@ -45,7 +49,7 @@ ok( $old_verify == 0);
 ok( !defined $old_decrypttext);
 ok( $ttl_verify );
 ok( $ttl_decrypttext eq $plaintext );
-
+ok( $token_time == $current_time);
 
 #########################
 
