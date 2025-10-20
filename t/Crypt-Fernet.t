@@ -52,7 +52,9 @@ my $old_token = 'gAAAAABT8bVcdaked9SPOkuQ77KsfkcoG9GvuU4SVWuMa3ewrxpQdreLdCT6cc7
 
 my $old_verify = Crypt::Fernet::verify($old_key, $old_token, $ttl);
 my $old_decrypttext;
-eval { $old_decrypttext = Crypt::Fernet::decrypt($old_key, $old_token, $ttl); };
+eval { 
+    $old_decrypttext = Crypt::Fernet::decrypt($old_key, $old_token, $ttl); 
+};
 
 ok( $old_verify == 0, "Old token correctly expires with TTL");
 ok( !defined $old_decrypttext, "Old token correctly fails decryption with TTL");

@@ -34,6 +34,9 @@ our $MAX_CLOCK_SKEW = 60;
     sub new { my $class = shift; bless {}, $class }
 }
 
+# Simple die with string for compatibility
+sub _invalid_token { die "Invalid token"; }
+
 
 # Preloaded methods go here.
 
@@ -77,7 +80,7 @@ sub encrypt_at_time {
     my ($key, $data, $current_time) = @_;
     
     # Input validation
-    die Crypt::Fernet::InvalidToken->new() unless defined $data;
+    die "data must be bytes" unless defined $data;
     die "data must be bytes" unless ref($data) eq '' || ref($data) eq 'SCALAR';
     
     # Convert string key to bytes if needed
@@ -141,7 +144,7 @@ sub _get_unverified_token_data {
     
     # Accept both string and bytes
     unless (defined $token && (ref($token) eq '' || ref($token) eq 'SCALAR')) {
-        die Crypt::Fernet::InvalidToken->new();
+        die "Invalid token";
     }
     
     my $data;
@@ -149,12 +152,12 @@ sub _get_unverified_token_data {
         $data = urlsafe_b64decode($token);
     };
     if ($@) {
-        die Crypt::Fernet::InvalidToken->new();
+        die "Invalid token";
     }
     
     # Check minimum length and version
     if (!$data || length($data) < 9 || substr($data, 0, 1) ne $FERNET_TOKEN_VERSION) {
-        die Crypt::Fernet::InvalidToken->new();
+        die "Invalid token";
     }
     
     # Extract timestamp (8 bytes big-endian)
@@ -170,12 +173,12 @@ sub _decrypt_data {
     # TTL validation with clock skew protection
     if (defined $ttl) {
         if ($timestamp + $ttl < $current_time) {
-            die Crypt::Fernet::InvalidToken->new();
+            die "Invalid token";
         }
         
         # Protect against clock skew attacks
         if ($current_time + $MAX_CLOCK_SKEW < $timestamp) {
-            die Crypt::Fernet::InvalidToken->new();
+            die "Invalid token";
         }
     }
     
@@ -205,7 +208,7 @@ sub _decrypt_data {
         $plaintext = $cipher->decrypt($ciphertext);
     };
     if ($@) {
-        die Crypt::Fernet::InvalidToken->new();
+        die "Invalid token";
     }
     
     return $plaintext;
@@ -216,9 +219,11 @@ sub verify {
     
     eval {
         decrypt($key, $token, $ttl);
-        return 1;
     };
-    return 0;
+    if ($@) {
+        return 0;
+    }
+    return 1;
 }
 
 sub _verify_signature {
@@ -232,19 +237,21 @@ sub _verify_signature {
     my $computed_hmac = hmac_sha256($message, $signing_key);
     
     unless (_constant_time_compare($stored_hmac, $computed_hmac)) {
-        die Crypt::Fernet::InvalidToken->new();
+        die "Invalid token";
     }
 }
 
 sub _timestamp {
     my $time = shift || time();
-    # Convert to 64-bit big-endian integer
-    return pack("Q>", $time);
+    # Convert to 64-bit big-endian integer - compatible with older Perl
+    return pack("N2", ($time >> 32) & 0xFFFFFFFF, $time & 0xFFFFFFFF);
 }
 
 sub _bytes_to_timestamp {
     my ($bytes) = @_;
-    return unpack("Q>", $bytes);
+    # Unpack 64-bit big-endian integer - compatible with older Perl
+    my ($high, $low) = unpack("N2", $bytes);
+    return ($high << 32) | $low;
 }
 
 # MultiFernet class for key rotation
@@ -281,7 +288,7 @@ sub _bytes_to_timestamp {
             };
             # Continue to next key if this one fails
         }
-        die Crypt::Fernet::InvalidToken->new();
+        die "Invalid token";
     }
     
     sub decrypt_at_time {
@@ -293,7 +300,7 @@ sub _bytes_to_timestamp {
             };
             # Continue to next key if this one fails
         }
-        die Crypt::Fernet::InvalidToken->new();
+        die "Invalid token";
     }
     
     sub rotate {
@@ -311,7 +318,7 @@ sub _bytes_to_timestamp {
         }
         
         unless (defined $plaintext) {
-            die Crypt::Fernet::InvalidToken->new();
+            die "Invalid token";
         }
         
         # Re-encrypt with the first key, preserving timestamp
@@ -326,7 +333,7 @@ sub _bytes_to_timestamp {
                 return Crypt::Fernet::extract_timestamp($key, $token);
             };
         }
-        die Crypt::Fernet::InvalidToken->new();
+        die "Invalid token";
     }
 }
 
