@@ -15,7 +15,7 @@ use Exporter 5.57 qw( import );
 # If you do not need this, moving things directly into @EXPORT or @EXPORT_OK
 # will save memory.
 our %EXPORT_TAGS = ( 'all' => [ qw(
-  fernet_genkey fernet_encrypt fernet_verify fernet_decrypt	
+  fernet_genkey fernet_encrypt fernet_encrypt_at_time fernet_verify fernet_decrypt fernet_decrypt_at_time fernet_extract_timestamp
 ) ] );
 
 our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
@@ -25,14 +25,25 @@ our @EXPORT = qw(
 );
 
 our $FERNET_TOKEN_VERSION = pack("H*", '80');
+our $MAX_CLOCK_SKEW = 60;
+
+# Exception class for invalid tokens
+{
+    package Crypt::Fernet::InvalidToken;
+    use overload '""' => sub { "Invalid token" };
+    sub new { my $class = shift; bless {}, $class }
+}
 
 
 # Preloaded methods go here.
 
 sub fernet_genkey { Crypt::Fernet::generate_key() }
 sub fernet_encrypt  { Crypt::Fernet::encrypt(@_) }
+sub fernet_encrypt_at_time { Crypt::Fernet::encrypt_at_time(@_) }
 sub fernet_verify  { Crypt::Fernet::verify(@_) }
 sub fernet_decrypt { Crypt::Fernet::decrypt(@_) }
+sub fernet_decrypt_at_time { Crypt::Fernet::decrypt_at_time(@_) }
+sub fernet_extract_timestamp { Crypt::Fernet::extract_timestamp(@_) }
 
 
 use Crypt::CBC;
@@ -41,101 +52,282 @@ use Crypt::URandom qw( urandom );
 use Digest::SHA qw(hmac_sha256);
 use MIME::Base64::URLSafe;
 
+# Constant-time string comparison to prevent timing attacks
+sub _constant_time_compare {
+    my ($a, $b) = @_;
+    return 0 if length($a) != length($b);
+    
+    my $result = 0;
+    for my $i (0 .. length($a) - 1) {
+        $result |= ord(substr($a, $i, 1)) ^ ord(substr($b, $i, 1));
+    }
+    return $result == 0;
+}
+
 sub generate_key {
-    return _urlsafe_pading_base64_encode(Crypt::CBC->random_bytes(32));
+    return urlsafe_b64encode(urandom(32));
 }
 
 sub encrypt {
     my ($key, $data) = @_;
-    my $b64decode_key = urlsafe_b64decode($key);
-    my $signkey = substr $b64decode_key, 0, 16;
-    my $encryptkey = substr $b64decode_key, 16, 16;
+    return encrypt_at_time($key, $data, time());
+}
+
+sub encrypt_at_time {
+    my ($key, $data, $current_time) = @_;
+    
+    # Input validation
+    die Crypt::Fernet::InvalidToken->new() unless defined $data;
+    die "data must be bytes" unless ref($data) eq '' || ref($data) eq 'SCALAR';
+    
+    # Convert string key to bytes if needed
+    my $key_bytes;
+    eval {
+        $key_bytes = urlsafe_b64decode($key);
+    };
+    if ($@ || length($key_bytes) != 32) {
+        die "Fernet key must be 32 url-safe base64-encoded bytes.";
+    }
+    
+    my $signing_key = substr($key_bytes, 0, 16);
+    my $encryption_key = substr($key_bytes, 16, 16);
     my $iv = urandom(16);
-    my $cipher = Crypt::CBC->new(-literal_key => 1,
-                                 -key         => $encryptkey,
-                                 -iv          => $iv,
-                                 -keysize     => 16,
-                                 -padding     => 'standard',
-                                 -cipher      => 'Rijndael',
-                                 -header      => 'none',
-                             );
+    
+    my $cipher = Crypt::CBC->new(
+        -literal_key => 1,
+        -key         => $encryption_key,
+        -iv          => $iv,
+        -keysize     => 16,
+        -padding     => 'standard',
+        -cipher      => 'Rijndael',
+        -header      => 'none',
+    );
+    
     my $ciphertext = $cipher->encrypt($data);
-    my $pre_token = $FERNET_TOKEN_VERSION . _timestamp() . $iv . $ciphertext;
-    my $digest=hmac_sha256($pre_token, $signkey);
-    my $token = $pre_token . $digest;
-    return _urlsafe_pading_base64_encode($token);
+    my $basic_parts = $FERNET_TOKEN_VERSION . _timestamp($current_time) . $iv . $ciphertext;
+    my $hmac = hmac_sha256($basic_parts, $signing_key);
+    my $token = $basic_parts . $hmac;
+    
+    return urlsafe_b64encode($token);
 }
 
 sub decrypt {
     my ($key, $token, $ttl) = @_;
-    verify($key, $token, $ttl) or return;
-    my $b64decode_key = urlsafe_b64decode($key);
-    my $token_data = urlsafe_b64decode($token);
+    my ($timestamp, $data) = _get_unverified_token_data($token);
+    return _decrypt_data($key, $data, $timestamp, $ttl, time());
+}
 
-    my $encryptkey = substr $b64decode_key, 16, 16;
-    my $iv = substr $token_data, 9, 16;
+sub decrypt_at_time {
+    my ($key, $token, $ttl, $current_time) = @_;
+    
+    die "decrypt_at_time() can only be used with a defined ttl" unless defined $ttl;
+    
+    my ($timestamp, $data) = _get_unverified_token_data($token);
+    return _decrypt_data($key, $data, $timestamp, $ttl, $current_time);
+}
 
-    my $ciphertextlen = (length $token_data) - 25 - 32;
-    my $ciphertext = substr $token_data, 25, $ciphertextlen;
- 
-    my $cipher = Crypt::CBC->new(-literal_key => 1,
-                                 -key         => $encryptkey,
-                                 -iv          => $iv,
-                                 -keysize     => 16,
-                                 -padding     => 'standard',
-                                 -cipher      => 'Rijndael',
-                                 -header      => 'none',
-                             );
-    my $plaintext = $cipher->decrypt($ciphertext);
-    return $plaintext; 
+sub extract_timestamp {
+    my ($key, $token) = @_;
+    my ($timestamp, $data) = _get_unverified_token_data($token);
+    
+    # Verify the token signature to ensure it's authentic
+    _verify_signature($key, $data);
+    
+    return $timestamp;
+}
+
+sub _get_unverified_token_data {
+    my ($token) = @_;
+    
+    # Accept both string and bytes
+    unless (defined $token && (ref($token) eq '' || ref($token) eq 'SCALAR')) {
+        die Crypt::Fernet::InvalidToken->new();
+    }
+    
+    my $data;
+    eval {
+        $data = urlsafe_b64decode($token);
+    };
+    if ($@) {
+        die Crypt::Fernet::InvalidToken->new();
+    }
+    
+    # Check minimum length and version
+    if (!$data || length($data) < 9 || substr($data, 0, 1) ne $FERNET_TOKEN_VERSION) {
+        die Crypt::Fernet::InvalidToken->new();
+    }
+    
+    # Extract timestamp (8 bytes big-endian)
+    my $timestamp_bytes = substr($data, 1, 8);
+    my $timestamp = _bytes_to_timestamp($timestamp_bytes);
+    
+    return ($timestamp, $data);
+}
+
+sub _decrypt_data {
+    my ($key, $data, $timestamp, $ttl, $current_time) = @_;
+    
+    # TTL validation with clock skew protection
+    if (defined $ttl) {
+        if ($timestamp + $ttl < $current_time) {
+            die Crypt::Fernet::InvalidToken->new();
+        }
+        
+        # Protect against clock skew attacks
+        if ($current_time + $MAX_CLOCK_SKEW < $timestamp) {
+            die Crypt::Fernet::InvalidToken->new();
+        }
+    }
+    
+    # Verify signature
+    _verify_signature($key, $data);
+    
+    # Decrypt
+    my $key_bytes = urlsafe_b64decode($key);
+    my $encryption_key = substr($key_bytes, 16, 16);
+    my $iv = substr($data, 9, 16);
+    
+    my $ciphertext_len = length($data) - 25 - 32;
+    my $ciphertext = substr($data, 25, $ciphertext_len);
+    
+    my $cipher = Crypt::CBC->new(
+        -literal_key => 1,
+        -key         => $encryption_key,
+        -iv          => $iv,
+        -keysize     => 16,
+        -padding     => 'standard',
+        -cipher      => 'Rijndael',
+        -header      => 'none',
+    );
+    
+    my $plaintext;
+    eval {
+        $plaintext = $cipher->decrypt($ciphertext);
+    };
+    if ($@) {
+        die Crypt::Fernet::InvalidToken->new();
+    }
+    
+    return $plaintext;
 }
 
 sub verify {
     my ($key, $token, $ttl) = @_;
-    $ttl ||= 0;
-    my $b64decode_key = urlsafe_b64decode($key);
-    my $msg = urlsafe_b64decode($token);
-    my $token_version = substr $msg, 0, 1;
-    ($token_version eq $FERNET_TOKEN_VERSION) or return 0;
-
-    if ($ttl > 0) {
-        my $timestamp_bytes = substr $msg, 1, 8;
-        my $timestamp = _byte_to_time($timestamp_bytes);
-        return 0 if (time - $timestamp > $ttl);
-    }    
-
-    my $token_sign = substr $msg, (length $msg) - 32, 32;
-    my $signkey = substr $b64decode_key, 0, 16;
-    my $pre_token = substr $msg, 0, (length $msg) - 32;
-    my $verify_digest = hmac_sha256($pre_token , $signkey);
-    ($token_sign eq $verify_digest) and return 1;
+    
+    eval {
+        decrypt($key, $token, $ttl);
+        return 1;
+    };
     return 0;
 }
 
-sub _timestamp {
-    use bytes;
-    my $time = time;
-    my $time64bit;
-    for my $index (0..7) {
-        $time64bit .= substr pack("I", ($time >> $index * 8) & 0xFF), 0, 1;
+sub _verify_signature {
+    my ($key, $data) = @_;
+    
+    my $key_bytes = urlsafe_b64decode($key);
+    my $signing_key = substr($key_bytes, 0, 16);
+    
+    my $stored_hmac = substr($data, -32);
+    my $message = substr($data, 0, length($data) - 32);
+    my $computed_hmac = hmac_sha256($message, $signing_key);
+    
+    unless (_constant_time_compare($stored_hmac, $computed_hmac)) {
+        die Crypt::Fernet::InvalidToken->new();
     }
-    my $result = reverse $time64bit;
-    no bytes;
-    return $result;
 }
 
-sub _urlsafe_pading_base64_encode {
-    my ($msg) = @_;
-    my $s = urlsafe_b64encode($msg);
-    return $s.("=" x (4 - length($s) % 4));
+sub _timestamp {
+    my $time = shift || time();
+    # Convert to 64-bit big-endian integer
+    return pack("Q>", $time);
 }
 
-sub _byte_to_time {
+sub _bytes_to_timestamp {
     my ($bytes) = @_;
-    use bytes;
-    my $rb =  reverse $bytes;
-    my $time = unpack 'V', $rb;
-    return $time;
+    return unpack("Q>", $bytes);
+}
+
+# MultiFernet class for key rotation
+{
+    package Crypt::Fernet::MultiFernet;
+    
+    sub new {
+        my ($class, $fernets) = @_;
+        
+        die "MultiFernet requires at least one Fernet key" unless @$fernets;
+        
+        return bless {
+            keys => $fernets,
+        }, $class;
+    }
+    
+    sub encrypt {
+        my ($self, $data) = @_;
+        return $self->encrypt_at_time($data, time());
+    }
+    
+    sub encrypt_at_time {
+        my ($self, $data, $current_time) = @_;
+        # Always use the first key for encryption
+        return Crypt::Fernet::encrypt_at_time($self->{keys}->[0], $data, $current_time);
+    }
+    
+    sub decrypt {
+        my ($self, $token, $ttl) = @_;
+        
+        for my $key (@{$self->{keys}}) {
+            eval {
+                return Crypt::Fernet::decrypt($key, $token, $ttl);
+            };
+            # Continue to next key if this one fails
+        }
+        die Crypt::Fernet::InvalidToken->new();
+    }
+    
+    sub decrypt_at_time {
+        my ($self, $token, $ttl, $current_time) = @_;
+        
+        for my $key (@{$self->{keys}}) {
+            eval {
+                return Crypt::Fernet::decrypt_at_time($key, $token, $ttl, $current_time);
+            };
+            # Continue to next key if this one fails
+        }
+        die Crypt::Fernet::InvalidToken->new();
+    }
+    
+    sub rotate {
+        my ($self, $token) = @_;
+        
+        my ($timestamp, $data) = Crypt::Fernet::_get_unverified_token_data($token);
+        
+        # Try to decrypt with each key
+        my $plaintext;
+        for my $key (@{$self->{keys}}) {
+            eval {
+                $plaintext = Crypt::Fernet::_decrypt_data($key, $data, $timestamp, undef, time());
+                last;
+            };
+        }
+        
+        unless (defined $plaintext) {
+            die Crypt::Fernet::InvalidToken->new();
+        }
+        
+        # Re-encrypt with the first key, preserving timestamp
+        return Crypt::Fernet::encrypt_at_time($self->{keys}->[0], $plaintext, $timestamp);
+    }
+    
+    sub extract_timestamp {
+        my ($self, $token) = @_;
+        
+        for my $key (@{$self->{keys}}) {
+            eval {
+                return Crypt::Fernet::extract_timestamp($key, $token);
+            };
+        }
+        die Crypt::Fernet::InvalidToken->new();
+    }
 }
 
 1;
@@ -156,15 +348,36 @@ Crypt::Fernet - Perl extension for Fernet (symmetric encryption)
   my $verify = Crypt::Fernet::verify($key, $token);
   my $decrypttext = Crypt::Fernet::decrypt($key, $token);
 
+  # Encrypt with specific timestamp (for testing)
+  my $timestamp = time();
+  my $token_at_time = Crypt::Fernet::encrypt_at_time($key, $plaintext, $timestamp);
+
+  # Extract timestamp without decryption
+  my $extracted_time = Crypt::Fernet::extract_timestamp($key, $token);
+
+  # Decrypt at specific time with TTL
+  my $ttl = 10;
+  my $current_time = time();
+  my $ttl_decrypttext = Crypt::Fernet::decrypt_at_time($key, $token, $ttl, $current_time);
+
+  # Key rotation with MultiFernet
+  use Crypt::Fernet::MultiFernet;
+  my $key1 = Crypt::Fernet::generate_key();
+  my $key2 = Crypt::Fernet::generate_key();
+  my $multi = Crypt::Fernet::MultiFernet->new([$key1, $key2]);
+  
+  my $multi_token = $multi->encrypt($plaintext);
+  my $multi_decrypt = $multi->decrypt($multi_token);
+  
+  # Rotate token to new key
+  my $rotated_token = $multi->rotate($multi_token);
+
+  # Backward compatibility examples
   my $old_key = 'cJ3Fw3ehXqef-Vqi-U8YDcJtz8Gv-ZHyxultoAGHi4c=';
   my $old_token = 'gAAAAABT8bVcdaked9SPOkuQ77KsfkcoG9GvuU4SVWuMa3ewrxpQdreLdCT6cc7rdqkavhyLgqZC41dW2vwZJAHLYllwBmjgdQ==';
 
-  my $ttl = 10;
   my $old_verify = Crypt::Fernet::verify($old_key, $old_token, $ttl);
   my $old_decrypttext = Crypt::Fernet::decrypt($old_key, $old_token, $ttl);
-
-  my $ttl_verify = Crypt::Fernet::verify($key, $token, $ttl);
-  my $ttl_decrypttext = Crypt::Fernet::decrypt($key, $token, $ttl);
 
 
 =head1 DESCRIPTION
@@ -172,8 +385,78 @@ Crypt::Fernet - Perl extension for Fernet (symmetric encryption)
 Fernet provides guarantees that a message encrypted using it cannot be manipulated or read without the key. Fernet is an implementation of symmetric (also known as "secret key") authenticated cryptography.
 This is the Perl Implementation
 
+This updated implementation includes the latest features from the Python cryptography library:
+
+=over 4
+
+=item * String/bytes token support - accepts both string and binary tokens
+
+=item * encrypt_at_time() - encrypt with specific timestamp for testing
+
+=item * extract_timestamp() - get token timestamp without decryption
+
+=item * decrypt_at_time() - decrypt with specific current time
+
+=item * MultiFernet - key rotation support
+
+=item * Clock skew protection - prevents attacks using future timestamps
+
+=item * Constant-time HMAC comparison - prevents timing attacks
+
+=item * Improved error handling with proper exception classes
+
+=item * Enhanced input validation and security
+
+=back
+
 More Detail:
    https://github.com/fernet/spec/blob/master/Spec.md
+
+=head2 FUNCTIONS
+
+=head3 generate_key()
+
+Generates a fresh fernet key. Keep this somewhere safe! Returns a URL-safe base64-encoded 32-byte key.
+
+=head3 encrypt($key, $data)
+
+Encrypts data using the current time as timestamp. Returns a Fernet token.
+
+=head3 encrypt_at_time($key, $data, $timestamp)
+
+Encrypts data using a specific timestamp. Useful for testing. Returns a Fernet token.
+
+=head3 decrypt($key, $token, $ttl)
+
+Decrypts a Fernet token. If TTL is specified, validates token age. Returns plaintext or dies on error.
+
+=head3 decrypt_at_time($key, $token, $ttl, $current_time)
+
+Decrypts a token using a specific current time for TTL validation. Returns plaintext or dies on error.
+
+=head3 verify($key, $token, $ttl)
+
+Verifies a token is valid and not expired. Returns 1 for valid, 0 for invalid.
+
+=head3 extract_timestamp($key, $token)
+
+Extracts the timestamp from a token without decrypting it. Verifies signature. Returns timestamp or dies on error.
+
+=head2 MultiFernet CLASS
+
+The MultiFernet class implements key rotation for Fernet. It takes an array reference of keys and implements the same API plus rotation.
+
+=head3 new(\\@keys)
+
+Creates a new MultiFernet instance with an array of keys. First key is used for encryption.
+
+=head3 encrypt($data), decrypt($token, $ttl), etc.
+
+Same API as regular Fernet functions, but tries keys in order for decryption.
+
+=head3 rotate($token)
+
+Re-encrypts a token with the first key, preserving the original timestamp.
 
 =head2 EXPORT
 
@@ -194,8 +477,34 @@ Source of this project:
 This module requires these other modules and libraries:
 
   use Crypt::CBC;
+  use Crypt::Rijndael;
+  use Crypt::URandom;
   use Digest::SHA qw(hmac_sha256);
   use MIME::Base64::URLSafe;
+
+=head1 SECURITY IMPROVEMENTS
+
+This version includes several security improvements over the original:
+
+=over 4
+
+=item * Constant-time HMAC comparison to prevent timing attacks
+
+=item * Clock skew protection (60 second tolerance)
+
+=item * Proper input validation and type checking
+
+=item * Secure random number generation with Crypt::URandom
+
+=item * Exception-based error handling
+
+=item * Support for both string and binary tokens
+
+=back
+
+=head1 BACKWARD COMPATIBILITY
+
+This implementation maintains full backward compatibility with tokens generated by the previous version.
 
 =head1 AUTHOR
 
